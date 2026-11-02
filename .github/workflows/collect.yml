@@ -7,7 +7,7 @@ name: Collect vehicle snapshot
 on:
   schedule:
     # GitHub is busiest at the full hour, so we start a few minutes after a slot.
-    - cron: "4-54/10 * * * *"
+    - cron: "4,14,24,34,44,54 * * * *"
   workflow_dispatch:
 
 # Two runs must not push at the same time.
