@@ -1,0 +1,43 @@
+# Saves one snapshot every 10 minutes and commits it to the repository.
+#
+# AI citation: this file was generated with Claude Code (model Claude Opus 5.5,
+# Anthropic) on 2026-11-02 and reviewed by the project team.
+name: Collect vehicle snapshot
+
+on:
+  schedule:
+    # GitHub is busiest at the full hour, so we start a few minutes after a slot.
+    - cron: "4-54/10 * * * *"
+  workflow_dispatch:
+
+# Two runs must not push at the same time.
+concurrency:
+  group: collect
+
+permissions:
+  contents: write
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Save snapshot
+        run: python3 collector/collect.py
+
+      - name: Commit new data
+        # Also runs after a failed snapshot, so that the other city is not lost.
+        if: ${{ !cancelled() }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data
+          git diff --cached --quiet && exit 0
+          git commit -m "Add snapshot $(date -u +%Y-%m-%dT%H:%M)Z"
+          for attempt in 1 2 3; do
+            git pull --rebase && git push && exit 0
+            sleep 10
+          done
+          exit 1
