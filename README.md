@@ -11,6 +11,8 @@ Die API von sharedmobility.ch zeigt nur den aktuellen Stand. Deshalb speichert G
 | St. Gallen | `data/st_gallen/<Datum>.csv` | 10 Min. | pro Zelle, Anbieter und Fahrzeugtyp |
 | Zürich (Absicherung) | `data/zurich/<Datum>.csv` | 30 Min. | nur pro Zelle (`all` in beiden Spalten) |
 
+Bricht die grosse Datei ab, holt der Scraper St. Gallen stattdessen über die Karten-Schnittstelle von sharedmobility.ch (`api.sharedmobility.ch/v1/sharedmobility/identify`). Zürich fehlt dann für diesen Zeitpunkt. Die Fahrzeugtypen von Dott werden dabei in die Namen der grossen Datei übersetzt. Andere Anbieter behalten den Namen der Karte, zum Beispiel `carvelo2go:E-CargoBike`.
+
 ### Datenformat
 
 ```text

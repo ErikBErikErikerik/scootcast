@@ -8,7 +8,8 @@ saves a new snapshot as often as its settings in CITIES say.
 Each row has the columns: timestamp | cell_id | provider_id | vehicle_type_id | count
 Vehicle IDs are deliberately not stored, because we do not track single vehicles.
 
-Data source: Swiss Federal Office of Energy (BFE), sharedmobility.ch (GBFS).
+Data source: Swiss Federal Office of Energy (BFE), sharedmobility.ch (GBFS feed,
+and its map API as a fallback for St. Gallen when the feed fails).
 
 AI citation: this file was generated with Claude Code (model Claude Opus 5.5,
 Anthropic) on 2026-11-02 and reviewed by the project team.
@@ -21,6 +22,7 @@ import json
 import math
 import sys
 import time
+import urllib.parse
 import urllib.request
 from collections import Counter
 from datetime import datetime, timezone
@@ -28,8 +30,26 @@ from pathlib import Path
 
 FEED_URL = "https://sharedmobility.ch/free_bike_status.json"
 USER_AGENT = "ScootCast (HSG FCS student project)"
-MAX_ATTEMPTS = 6
+MAX_ATTEMPTS = 3
 RETRY_WAIT_SECONDS = 10
+
+# The server sometimes closes the connection early, which shows up as an
+# incomplete read, a broken gzip stream or invalid JSON.
+DOWNLOAD_ERRORS = (http.client.HTTPException, OSError, EOFError, ValueError)
+
+# When the feed fails, the map API of sharedmobility.ch lists the same vehicles
+# around a point, 50 per page. It is only used for St. Gallen (about 20 pages),
+# because Zurich would need about 160 pages per snapshot.
+FALLBACK_URL = "https://api.sharedmobility.ch/v1/sharedmobility/identify"
+FALLBACK_CITY = "st_gallen"
+FALLBACK_CENTER = (47.42, 9.36)
+FALLBACK_RADIUS_M = 8000
+FALLBACK_PAGE_SIZE = 50
+FALLBACK_MAX_PAGES = 100
+
+# The map API names vehicle types differently than the feed. Dott's types are
+# translated to the feed's names, so both sources give the same IDs.
+DOTT_VEHICLE_TYPES = {"E-Scooter": "dott_scooter", "E-Bike": "dott_bicycle"}
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 CSV_COLUMNS = ["timestamp", "cell_id", "provider_id", "vehicle_type_id", "count"]
@@ -76,12 +96,12 @@ def snapshot_slot(unix_time, minutes):
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def fetch_feed():
-    """Download the feed, retrying because a single failed call would leave a gap."""
+def download_json(url):
+    """Download and parse JSON, retrying because a single failed call would leave a gap."""
     # Compressed, the feed is about 0.9 MB instead of 7 MB, which makes it less
     # likely that the server cuts the download off halfway.
     headers = {"User-Agent": USER_AGENT, "Accept-Encoding": "gzip"}
-    request = urllib.request.Request(FEED_URL, headers=headers)
+    request = urllib.request.Request(url, headers=headers)
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
@@ -89,13 +109,55 @@ def fetch_feed():
                 if response.headers.get("Content-Encoding") == "gzip":
                     body = gzip.decompress(body)
                 return json.loads(body)
-        # The server sometimes closes the connection early, which shows up as an
-        # incomplete read, a broken gzip stream or invalid JSON.
-        except (http.client.HTTPException, OSError, EOFError, ValueError) as error:
+        except DOWNLOAD_ERRORS as error:
             print(f"Attempt {attempt}/{MAX_ATTEMPTS} failed: {error}")
             if attempt == MAX_ATTEMPTS:
                 raise
             time.sleep(RETRY_WAIT_SECONDS)
+
+
+def bike_from_map_item(item):
+    """Convert one result of the map API to the feed's format, or None for a station."""
+    attributes = item["attributes"]
+    # Stations are listed too, but the feed only contains single vehicles.
+    if attributes.get("pickup_type") != "free_floating":
+        return None
+
+    provider = attributes["provider_id"]
+    vehicle_type = (attributes.get("vehicle_type") or ["unknown"])[0]
+    if provider.startswith("dott"):
+        vehicle_type = DOTT_VEHICLE_TYPES.get(vehicle_type, vehicle_type)
+
+    return {
+        "lat": item["geometry"]["y"],
+        "lon": item["geometry"]["x"],
+        "is_disabled": attributes.get("vehicle_status_disabled", False),
+        "is_reserved": attributes.get("vehicle_status_reserved", False),
+        "provider_id": provider,
+        "vehicle_type_id": f"{provider}:{vehicle_type}",
+    }
+
+
+def fetch_fallback_bikes():
+    """Download all vehicles around St. Gallen from the map API, page by page."""
+    lat, lon = FALLBACK_CENTER
+    bikes = []
+    for page in range(FALLBACK_MAX_PAGES):
+        query = urllib.parse.urlencode({
+            "Geometry": f"{lon},{lat}",
+            "Tolerance": FALLBACK_RADIUS_M,
+            "geometryFormat": "esrijson",
+            "offset": page * FALLBACK_PAGE_SIZE,
+        })
+        items = download_json(f"{FALLBACK_URL}?{query}")
+        for item in items:
+            bike = bike_from_map_item(item)
+            if bike:
+                bikes.append(bike)
+        # A page that is not full is the last one.
+        if len(items) < FALLBACK_PAGE_SIZE:
+            return bikes
+    raise RuntimeError(f"Map API returned more than {FALLBACK_MAX_PAGES} pages")
 
 
 def count_vehicles(bikes, bounding_box, detailed=True):
@@ -140,12 +202,18 @@ def append_snapshot(path, slot, counts):
 
 
 def main():
-    feed = fetch_feed()
-    bikes = feed["data"]["bikes"]
+    try:
+        feed = download_json(FEED_URL)
+        bikes, updated, cities = feed["data"]["bikes"], feed["last_updated"], CITIES
+    except DOWNLOAD_ERRORS as error:
+        # Zurich is skipped and shows up as a gap in check_gaps.py.
+        print(f"Feed failed ({error}), using the map API for {FALLBACK_CITY} only")
+        bikes, updated = fetch_fallback_bikes(), time.time()
+        cities = {FALLBACK_CITY: CITIES[FALLBACK_CITY]}
 
     any_city_empty = False
-    for city, settings in CITIES.items():
-        slot = snapshot_slot(feed["last_updated"], settings["minutes"])
+    for city, settings in cities.items():
+        slot = snapshot_slot(updated, settings["minutes"])
         path = DATA_DIR / city / f"{slot[:10]}.csv"
         counts = count_vehicles(bikes, settings["box"], settings["detailed"])
         if not counts:

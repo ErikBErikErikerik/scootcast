@@ -17,6 +17,7 @@ from collect import (
     CELL_SIZE_M,
     METERS_PER_DEGREE_LAT,
     append_snapshot,
+    bike_from_map_item,
     cell_center,
     cell_id,
     count_vehicles,
@@ -76,6 +77,33 @@ class CountTests(unittest.TestCase):
 
         counts = count_vehicles([bike(), other_provider], BOX, detailed=False)
         self.assertEqual(counts, {(cell_id(47.5, 9.5), "all", "all"): 2})
+
+
+class MapApiTests(unittest.TestCase):
+    def map_item(self, provider, vehicle_type, pickup_type="free_floating"):
+        return {
+            "geometry": {"x": 9.37, "y": 47.42},
+            "attributes": {
+                "provider_id": provider,
+                "pickup_type": pickup_type,
+                "vehicle_type": [vehicle_type],
+                "vehicle_status_disabled": False,
+                "vehicle_status_reserved": False,
+            },
+        }
+
+    def test_dott_types_match_the_feed(self):
+        bike = bike_from_map_item(self.map_item("dott_st-gallen", "E-Scooter"))
+        self.assertEqual(bike["vehicle_type_id"], "dott_st-gallen:dott_scooter")
+        self.assertEqual((bike["lat"], bike["lon"]), (47.42, 9.37))
+
+    def test_other_providers_keep_the_map_type(self):
+        bike = bike_from_map_item(self.map_item("carvelo2go", "E-CargoBike"))
+        self.assertEqual(bike["vehicle_type_id"], "carvelo2go:E-CargoBike")
+
+    def test_stations_are_skipped(self):
+        item = self.map_item("mobility", "E-Car", pickup_type="station_based")
+        self.assertIsNone(bike_from_map_item(item))
 
 
 class StorageTests(unittest.TestCase):
