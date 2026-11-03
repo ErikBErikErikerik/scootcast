@@ -15,11 +15,12 @@ Anthropic) on 2026-11-02 and reviewed by the project team.
 """
 
 import csv
+import gzip
+import http.client
 import json
 import math
 import sys
 import time
-import urllib.error
 import urllib.request
 from collections import Counter
 from datetime import datetime, timezone
@@ -27,8 +28,8 @@ from pathlib import Path
 
 FEED_URL = "https://sharedmobility.ch/free_bike_status.json"
 USER_AGENT = "ScootCast (HSG FCS student project)"
-MAX_ATTEMPTS = 3
-RETRY_WAIT_SECONDS = 20
+MAX_ATTEMPTS = 6
+RETRY_WAIT_SECONDS = 10
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 CSV_COLUMNS = ["timestamp", "cell_id", "provider_id", "vehicle_type_id", "count"]
@@ -77,12 +78,20 @@ def snapshot_slot(unix_time, minutes):
 
 def fetch_feed():
     """Download the feed, retrying because a single failed call would leave a gap."""
-    request = urllib.request.Request(FEED_URL, headers={"User-Agent": USER_AGENT})
+    # Compressed, the feed is about 0.9 MB instead of 7 MB, which makes it less
+    # likely that the server cuts the download off halfway.
+    headers = {"User-Agent": USER_AGENT, "Accept-Encoding": "gzip"}
+    request = urllib.request.Request(FEED_URL, headers=headers)
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
-                return json.load(response)
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+                body = response.read()
+                if response.headers.get("Content-Encoding") == "gzip":
+                    body = gzip.decompress(body)
+                return json.loads(body)
+        # The server sometimes closes the connection early, which shows up as an
+        # incomplete read, a broken gzip stream or invalid JSON.
+        except (http.client.HTTPException, OSError, EOFError, ValueError) as error:
             print(f"Attempt {attempt}/{MAX_ATTEMPTS} failed: {error}")
             if attempt == MAX_ATTEMPTS:
                 raise
