@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from datetime import datetime
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "collector"))
@@ -21,6 +22,7 @@ from collect import (
     cell_center,
     cell_id,
     count_vehicles,
+    load_bikes,
     slot_already_saved,
     snapshot_slot,
 )
@@ -104,6 +106,23 @@ class MapApiTests(unittest.TestCase):
     def test_stations_are_skipped(self):
         item = self.map_item("mobility", "E-Car", pickup_type="station_based")
         self.assertIsNone(bike_from_map_item(item))
+
+
+class SourceTests(unittest.TestCase):
+    def test_empty_feed_falls_back_to_the_map_api(self):
+        empty_feed = {"last_updated": 1793652505, "data": {"bikes": []}}
+        with mock.patch("collect.download_json", return_value=empty_feed), \
+                mock.patch("collect.fetch_fallback_bikes", return_value=[bike()]):
+            bikes, _, cities = load_bikes()
+        self.assertEqual(bikes, [bike()])
+        self.assertEqual(list(cities), ["st_gallen"])
+
+    def test_full_feed_saves_all_cities(self):
+        feed = {"last_updated": 1793652505, "data": {"bikes": [bike()]}}
+        with mock.patch("collect.download_json", return_value=feed):
+            bikes, updated, cities = load_bikes()
+        self.assertEqual((bikes, updated), ([bike()], 1793652505))
+        self.assertEqual(list(cities), ["st_gallen", "zurich"])
 
 
 class StorageTests(unittest.TestCase):

@@ -201,15 +201,23 @@ def append_snapshot(path, slot, counts):
             writer.writerow([slot, cell, provider, vehicle_type, count])
 
 
-def main():
+def load_bikes():
+    """Return (bikes, last update, cities to save), from the feed or the map API."""
     try:
         feed = download_json(FEED_URL)
-        bikes, updated, cities = feed["data"]["bikes"], feed["last_updated"], CITIES
+        bikes = feed["data"]["bikes"]
+        # At night the feed is sometimes complete but lists no vehicles at all.
+        if not bikes:
+            raise ValueError("feed lists no vehicles")
+        return bikes, feed["last_updated"], CITIES
     except DOWNLOAD_ERRORS as error:
         # Zurich is skipped and shows up as a gap in check_gaps.py.
         print(f"Feed failed ({error}), using the map API for {FALLBACK_CITY} only")
-        bikes, updated = fetch_fallback_bikes(), time.time()
-        cities = {FALLBACK_CITY: CITIES[FALLBACK_CITY]}
+        return fetch_fallback_bikes(), time.time(), {FALLBACK_CITY: CITIES[FALLBACK_CITY]}
+
+
+def main():
+    bikes, updated, cities = load_bikes()
 
     any_city_empty = False
     for city, settings in cities.items():
