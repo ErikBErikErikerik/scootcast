@@ -46,6 +46,7 @@ FALLBACK_CENTER = (47.42, 9.36)
 FALLBACK_RADIUS_M = 8000
 FALLBACK_PAGE_SIZE = 50
 FALLBACK_MAX_PAGES = 100
+FALLBACK_MAX_PASSES = 5
 
 # The map API names vehicle types differently than the feed. Dott's types are
 # translated to the feed's names, so both sources give the same IDs.
@@ -138,10 +139,10 @@ def bike_from_map_item(item):
     }
 
 
-def fetch_fallback_bikes():
-    """Download all vehicles around St. Gallen from the map API, page by page."""
+def fetch_fallback_pass():
+    """Page once through the map API around St. Gallen and return the raw items."""
     lat, lon = FALLBACK_CENTER
-    bikes = []
+    all_items = []
     for page in range(FALLBACK_MAX_PAGES):
         query = urllib.parse.urlencode({
             "Geometry": f"{lon},{lat}",
@@ -150,14 +151,30 @@ def fetch_fallback_bikes():
             "offset": page * FALLBACK_PAGE_SIZE,
         })
         items = download_json(f"{FALLBACK_URL}?{query}")
-        for item in items:
-            bike = bike_from_map_item(item)
-            if bike:
-                bikes.append(bike)
+        all_items.extend(items)
         # A page that is not full is the last one.
         if len(items) < FALLBACK_PAGE_SIZE:
-            return bikes
+            return all_items
     raise RuntimeError(f"Map API returned more than {FALLBACK_MAX_PAGES} pages")
+
+
+def fetch_fallback_bikes():
+    """Download all vehicles around St. Gallen from the map API.
+
+    The API returns its results in no fixed order, so one pass through the
+    pages lists some vehicles twice and skips others (about 450 instead of 580
+    vehicles in a test). We therefore keep each vehicle ID once and page through
+    again until a pass finds no new vehicle, which took two passes in tests.
+    """
+    items_by_id = {}
+    for _ in range(FALLBACK_MAX_PASSES):
+        known = len(items_by_id)
+        for item in fetch_fallback_pass():
+            items_by_id[item["id"]] = item
+        if len(items_by_id) == known:
+            break
+    bikes = (bike_from_map_item(item) for item in items_by_id.values())
+    return [bike for bike in bikes if bike]
 
 
 def count_vehicles(bikes, bounding_box, detailed=True):

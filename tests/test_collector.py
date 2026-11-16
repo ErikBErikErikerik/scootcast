@@ -22,6 +22,7 @@ from collect import (
     cell_center,
     cell_id,
     count_vehicles,
+    fetch_fallback_bikes,
     load_bikes,
     slot_already_saved,
     snapshot_slot,
@@ -82,8 +83,9 @@ class CountTests(unittest.TestCase):
 
 
 class MapApiTests(unittest.TestCase):
-    def map_item(self, provider, vehicle_type, pickup_type="free_floating"):
+    def map_item(self, provider, vehicle_type, pickup_type="free_floating", vehicle_id="a"):
         return {
+            "id": f"{provider}:{vehicle_id}",
             "geometry": {"x": 9.37, "y": 47.42},
             "attributes": {
                 "provider_id": provider,
@@ -106,6 +108,15 @@ class MapApiTests(unittest.TestCase):
     def test_stations_are_skipped(self):
         item = self.map_item("mobility", "E-Car", pickup_type="station_based")
         self.assertIsNone(bike_from_map_item(item))
+
+    def test_passes_are_merged_by_vehicle_id(self):
+        a, b, c = (self.map_item("dott", "E-Scooter", vehicle_id=v) for v in "abc")
+        # The first pass lists a twice and skips c; the third finds nothing new.
+        passes = [[a, a, b], [b, c, c], [a, b, c]]
+        with mock.patch("collect.fetch_fallback_pass", side_effect=passes) as fetch:
+            bikes = fetch_fallback_bikes()
+        self.assertEqual(len(bikes), 3)
+        self.assertEqual(fetch.call_count, 3)
 
 
 class SourceTests(unittest.TestCase):
