@@ -1,0 +1,1 @@
+# TODO: Filter nach Anbieter / Akkustand
