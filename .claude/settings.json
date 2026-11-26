@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 collector/check_gaps.py)",
+      "Bash(python3 analysis/daily_profile.py *)",
+      "Bash(python3 -m unittest *)",
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git pull --rebase *)",
+      "Bash(gh run list *)",
+      "Bash(gh run view *)",
+      "Bash(streamlit run app.py)"
+    ],
+    "deny": [
+      "Edit(data/**)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/check_ai_citation.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -41,6 +41,26 @@ python3 collector/check_gaps.py
 python3 -m unittest discover tests
 ```
 
+## Auswertung
+
+`analysis/load_data.py` liest die Daten, rechnet die Zeit in Schweizer Ortszeit um und lässt bekannte Störungen aus `analysis/outages.csv` weg. Ein Beispiel ist das Tagesprofil pro Ort, getrennt nach Werktag und Wochenende:
+
+```bash
+python3 analysis/daily_profile.py st_gallen --vehicle scooter
+```
+
+## Arbeiten mit Claude Code
+
+Den Ordner in Claude Code öffnen. `CLAUDE.md` enthält die Projektregeln, `.claude/settings.json` die gemeinsamen Rechte und einen Hook, der an die KI-Zitierung erinnert. Drei Befehle stehen bereit:
+
+- `/sammlung`: prüft, ob die Datensammlung läuft
+- `/trends`: wertet die Daten aus und erklärt die Muster
+- `/abgabe-check`: prüft den Stand gegen die 8 Bewertungskriterien
+
+Eigene Einstellungen gehören in `.claude/settings.local.json`, die nicht ins Repo kommt.
+
+## Zusammenarbeit
+
 Der Bot committet laufend neue Daten. Deshalb vor dem Pushen immer zuerst `git pull --rebase` ausführen.
 
 ## Quellen

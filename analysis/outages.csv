@@ -1,0 +1,8 @@
+city,start,end,reason
+st_gallen,2026-11-03T08:40:00Z,2026-11-03T08:50:00Z,map API fallback before the 2026-11-16 fix repeated or skipped vehicles
+st_gallen,2026-11-03T11:20:00Z,2026-11-03T11:40:00Z,most Dott scooters missing from the feed
+st_gallen,2026-11-07T07:30:00Z,2026-11-07T08:50:00Z,map API fallback before the 2026-11-16 fix repeated or skipped vehicles
+st_gallen,2026-11-08T07:00:00Z,2026-11-08T08:50:00Z,map API fallback before the 2026-11-16 fix repeated or skipped vehicles
+all,2026-11-08T07:40:00Z,2026-11-08T12:20:00Z,many Dott vehicles missing in both cities at once
+st_gallen,2026-11-16T08:00:00Z,2026-11-16T08:50:00Z,map API fallback before the 2026-11-16 fix repeated or skipped vehicles
+zurich,2026-11-18T07:00:00Z,2026-11-18T10:30:00Z,about 1400 vehicles missing from the feed
