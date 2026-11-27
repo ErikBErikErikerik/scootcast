@@ -1,0 +1,9 @@
+{
+  "name": "Historical frequency baseline",
+  "description": "Share of past snapshots in which the cell held at least one rentable vehicle of the given type, computed per cell, workday/weekend and hour of day. Placeholder for the ML model.",
+  "built_at": "2026-11-27T17:29:28+00:00",
+  "n_snapshots": 3480,
+  "n_cells": 736,
+  "data_from": "2026-11-02T21:50:00+01:00",
+  "data_to": "2026-11-27T17:50:00+01:00"
+}
