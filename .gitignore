@@ -4,3 +4,6 @@ __pycache__/
 .DS_Store
 
 .claude/settings.local.json
+
+# Rebuilt by model/build_dataset.py, too large for the repo.
+model/dataset/
