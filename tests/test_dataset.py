@@ -25,6 +25,7 @@ from model.build_dataset import (  # noqa: E402
     FEATURES_B,
     SPLIT_DATE,
     TARGETS,
+    add_weather_features,
     build,
     split_by_day,
 )
@@ -37,6 +38,20 @@ HEADER = "timestamp,cell_id,provider_id,vehicle_type_id,count\n"
 # December 2026 is used so Switzerland is on CET (UTC+1) throughout; the
 # fictitious test data has no risk of colliding with the DST change on
 # 2026-10-25 or any real outage.
+
+
+def _dummy_weather(start="2026-11-01", end="2026-12-15"):
+    """Return a flat weather DF that covers any test timestamp in our range.
+
+    Needed because build() calls load_weather() by default, which hits the
+    Open-Meteo API; passing a dummy frame keeps the tests offline.
+    """
+    hours = pd.date_range(start, end, freq="h", tz="Europe/Zurich")
+    return pd.DataFrame({
+        "time": hours,
+        "temperature_c": 10.0,
+        "precipitation_mm": 0.0,
+    })
 
 
 def _write_city_data(data_dir, city, rows):
@@ -74,7 +89,7 @@ class BuildDatasetTests(unittest.TestCase):
             (_ts("2026-12-01", "08:10"), "100_200", 1),
         ]
         _write_city_data(self.tempdir, "st_gallen", rows)
-        df = build("scooter", 0.0, data_dir=self.tempdir)
+        df = build("scooter", 0.0, data_dir=self.tempdir, weather_df=_dummy_weather())
         # cell 100_200 has no vehicle at 08:00 UTC = 09:00 local, but the
         # slot was stored.
         row = df[(df["cell_id"] == "100_200") & (df["time"].dt.strftime("%H:%M") == "09:00")]
@@ -90,7 +105,7 @@ class BuildDatasetTests(unittest.TestCase):
             (_ts("2026-12-01", "08:10"), "100_100", 1),
         ]
         _write_city_data(self.tempdir, "st_gallen", rows)
-        df = build("scooter", 0.0, data_dir=self.tempdir)
+        df = build("scooter", 0.0, data_dir=self.tempdir, weather_df=_dummy_weather())
         row = df[(df["cell_id"] == "100_101") & (df["time"].dt.strftime("%H:%M") == "09:10")]
         self.assertEqual(len(row), 1)
         self.assertEqual(int(row.iloc[0]["available"]), 0)
@@ -112,7 +127,7 @@ class BuildDatasetTests(unittest.TestCase):
         ]
         a_dir = self.tempdir / "a"
         _write_city_data(a_dir, "st_gallen", a_rows)
-        df_a = build("scooter", 0.0, data_dir=a_dir)
+        df_a = build("scooter", 0.0, data_dir=a_dir, weather_df=_dummy_weather())
 
         b_rows = base_rows + [
             # On day 8 cell 100_100 is missing (only 100_200 holds a vehicle).
@@ -120,7 +135,7 @@ class BuildDatasetTests(unittest.TestCase):
         ]
         b_dir = self.tempdir / "b"
         _write_city_data(b_dir, "st_gallen", b_rows)
-        df_b = build("scooter", 0.0, data_dir=b_dir)
+        df_b = build("scooter", 0.0, data_dir=b_dir, weather_df=_dummy_weather())
 
         def cell_100_100_rate_on(df, day_prefix):
             row = df[
@@ -149,7 +164,7 @@ class BuildDatasetTests(unittest.TestCase):
             (_ts("2026-12-08", "08:30"), "100_200", 1),
         ]
         _write_city_data(self.tempdir, "st_gallen", rows)
-        df = build("scooter", 0.0, data_dir=self.tempdir)
+        df = build("scooter", 0.0, data_dir=self.tempdir, weather_df=_dummy_weather())
         row = df[
             (df["cell_id"] == "100_100")
             & (df["time"].dt.strftime("%Y-%m-%d %H:%M") == "2026-12-08 09:30")
@@ -168,7 +183,7 @@ class BuildDatasetTests(unittest.TestCase):
             (_ts("2026-12-02", "07:00"), "100_100", 1),
         ]
         _write_city_data(self.tempdir, "st_gallen", rows)
-        df = build("scooter", 0.0, data_dir=self.tempdir)
+        df = build("scooter", 0.0, data_dir=self.tempdir, weather_df=_dummy_weather())
         day_2 = df[
             (df["cell_id"] == "100_100")
             & (df["time"].dt.strftime("%Y-%m-%d %H:%M") == "2026-12-02 08:00")
@@ -185,7 +200,7 @@ class BuildDatasetTests(unittest.TestCase):
             (_ts("2026-11-03", "09:00"), "100_100", 1),
         ]
         _write_city_data(self.tempdir, "st_gallen", rows)
-        df = build("scooter", 0.0, data_dir=self.tempdir)
+        df = build("scooter", 0.0, data_dir=self.tempdir, weather_df=_dummy_weather())
         times = set(df["time"].dt.strftime("%Y-%m-%dT%H:%M:%SZ%z").tolist())
         # Convert back: 09:00 UTC = 10:00 local.
         self.assertTrue(any("10:00:00" in t for t in times))
@@ -199,10 +214,55 @@ class BuildDatasetTests(unittest.TestCase):
             (_ts("2026-10-20", "08:10"), "100_100", 1),
         ]
         _write_city_data(self.tempdir, "st_gallen", rows)
-        df = build("scooter", 0.0, data_dir=self.tempdir)
+        df = build("scooter", 0.0, data_dir=self.tempdir, weather_df=_dummy_weather())
         identity = {"time", "cell_id", "vehicle"}
         documented = set(FEATURES_A + FEATURES_B + TARGETS + BASELINES)
         self.assertEqual(set(df.columns) - identity, documented)
+
+    def test_weather_joins_by_hourly_ceil(self):
+        # Open-Meteo's precipitation at 08:00 is the rain from 07:00 to 08:00,
+        # so a slot at 07:10 belongs to the 08:00 weather row. A slot at
+        # exactly 08:00 also keeps 08:00 (ceil of an aligned hour is itself).
+        tz = "Europe/Zurich"
+        base = pd.DataFrame({
+            "time": pd.to_datetime(
+                ["2026-12-01 07:10", "2026-12-01 08:00", "2026-12-01 08:10"]
+            ).tz_localize(tz),
+            "cell_id": ["100_100"] * 3,
+        })
+        wx = pd.DataFrame({
+            "time": pd.to_datetime(
+                ["2026-12-01 07:00", "2026-12-01 08:00", "2026-12-01 09:00"]
+            ).tz_localize(tz),
+            "temperature_c": [5.0, 7.0, 9.0],
+            "precipitation_mm": [0.1, 0.2, 0.3],
+        })
+        result = add_weather_features(base, wx).sort_values("time").reset_index(drop=True)
+        # 07:10 -> ceil 08:00
+        self.assertAlmostEqual(result.iloc[0]["temperature_c"], 7.0)
+        self.assertAlmostEqual(result.iloc[0]["precipitation_mm"], 0.2)
+        # 08:00 -> ceil 08:00 (unchanged)
+        self.assertAlmostEqual(result.iloc[1]["temperature_c"], 7.0)
+        self.assertAlmostEqual(result.iloc[1]["precipitation_mm"], 0.2)
+        # 08:10 -> ceil 09:00
+        self.assertAlmostEqual(result.iloc[2]["temperature_c"], 9.0)
+        self.assertAlmostEqual(result.iloc[2]["precipitation_mm"], 0.3)
+
+    def test_missing_weather_hour_stays_nan(self):
+        tz = "Europe/Zurich"
+        base = pd.DataFrame({
+            "time": pd.to_datetime(["2026-12-01 10:00"]).tz_localize(tz),
+            "cell_id": ["100_100"],
+        })
+        # weather only has 08:00, so 10:00 has no matching hour.
+        wx = pd.DataFrame({
+            "time": pd.to_datetime(["2026-12-01 08:00"]).tz_localize(tz),
+            "temperature_c": [7.0],
+            "precipitation_mm": [0.2],
+        })
+        result = add_weather_features(base, wx)
+        self.assertTrue(math.isnan(result.iloc[0]["temperature_c"]))
+        self.assertTrue(math.isnan(result.iloc[0]["precipitation_mm"]))
 
     def test_split_by_day_is_strict_on_the_split_date(self):
         # Build a frame spanning the SPLIT_DATE boundary.

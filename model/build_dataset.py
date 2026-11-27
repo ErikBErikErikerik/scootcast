@@ -6,10 +6,9 @@ baseline columns. Johannes trains on this in model/train.py from Tuesday on.
 The two targets are "available" (at least one rentable vehicle in the cell
 during this snapshot) and "available_nearby" (same, but any of the 3x3
 cells around it, including itself). Features are split into two groups:
-  A: only needs cell, time and the data history, so the app can compute it
-     offline. Wetter (temp, precip, wind) from Moritz' model/weather.py also
-     belongs here, because the forecast for "tomorrow" is known the evening
-     before. The weather columns are not added yet, there is a placeholder.
+  A: only needs cell, time, the data history and Moritz' hourly weather
+     (model/weather.py). The app can compute Group A offline, because
+     tomorrow's weather forecast is known the evening before.
   B: needs the live fleet, so the app has to call the sharedmobility.ch API
      when it renders the prediction page.
 
@@ -36,6 +35,8 @@ import pandas as pd
 MODEL_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = MODEL_DIR.parent
 DATASET_DIR = MODEL_DIR / "dataset"
+ARTIFACTS_DIR = MODEL_DIR / "artifacts"
+WEATHER_CACHE = ARTIFACTS_DIR / "weather_history.csv"
 
 sys.path.insert(0, str(MODEL_DIR))
 sys.path.insert(0, str(PROJECT_DIR / "analysis"))
@@ -44,6 +45,7 @@ sys.path.insert(0, str(PROJECT_DIR / "collector"))
 from load_data import iter_snapshots  # noqa: E402
 from collect import cell_center  # noqa: E402
 from build_baseline import classify_vehicle  # noqa: E402
+import weather as weather_module  # noqa: E402
 
 CITY = "st_gallen"
 DEFAULT_THRESHOLD = 0.10
@@ -70,6 +72,8 @@ FEATURES_A = [
     "recent_cell",
     "recent_nearby",
     "history_days",
+    "temperature_c",
+    "precipitation_mm",
 ]
 FEATURES_B = [
     "evening_count_cell",
@@ -342,6 +346,55 @@ def add_evening_features(base, df_raw, slot_times):
     return base.drop(columns=["prev_date", "evening_slot"])
 
 
+def load_weather(cache_path=WEATHER_CACHE):
+    """Return hourly weather history, from the live API with a CSV fallback.
+
+    The build calls get_history() once and writes the result to
+    model/artifacts/weather_history.csv, so the next build (and the handed-in
+    archive without internet) can still run. If the live call fails and the
+    cache is present, the cache is loaded and a note is printed. If neither
+    works, RuntimeError is raised: the build cannot continue without weather.
+    """
+    try:
+        weather_df = weather_module.get_history()
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        to_save = weather_df.copy()
+        to_save["time"] = to_save["time"].dt.strftime("%Y-%m-%dT%H:%M:%S%z")
+        to_save.to_csv(cache_path, index=False)
+        print(f"weather: fetched from Open-Meteo, cached to {cache_path.name}")
+        return weather_df
+    except Exception as error:  # pragma: no cover
+        if not cache_path.exists():
+            raise RuntimeError(
+                f"no weather from Open-Meteo and no cached {cache_path.name}: {error}"
+            ) from error
+        print(f"weather: Open-Meteo unreachable ({error}); using cached {cache_path.name}")
+        cached = pd.read_csv(cache_path)
+        cached["time"] = pd.to_datetime(cached["time"], utc=True).dt.tz_convert(
+            "Europe/Zurich"
+        )
+        return cached
+
+
+def add_weather_features(base, weather_df):
+    """Add temperature_c and precipitation_mm to base by hourly ceil join.
+
+    Open-Meteo's precipitation for 08:00 is the rain that fell between 07:00
+    and 08:00, so a slot at 07:10 belongs to the 08:00 weather row. A slot
+    at exactly 08:00 also keeps the 08:00 row (ceil of 08:00 is 08:00).
+    No leak: tomorrow's hourly forecast is known the evening before.
+    Missing hours stay NaN so train.py can decide how to handle them.
+    """
+    ceiled = base["time"].dt.ceil("h")
+    base = base.copy()
+    base["_weather_hour"] = ceiled
+    wx = weather_df[["time", "temperature_c", "precipitation_mm"]].rename(
+        columns={"time": "_weather_hour"}
+    )
+    base = base.merge(wx, on="_weather_hour", how="left")
+    return base.drop(columns=["_weather_hour"])
+
+
 def add_baseline_features(base):
     """Add baseline_week and baseline_week_nearby.
 
@@ -360,12 +413,15 @@ def add_baseline_features(base):
     return base
 
 
-def build(vehicle, threshold, data_dir=None):
+def build(vehicle, threshold, data_dir=None, weather_df=None):
     """Return the full training table as a pandas DataFrame.
 
     Pure function: reads via analysis.load_data.iter_snapshots, computes
     targets, features and baselines, and returns the combined frame. Used
-    both from the CLI (main writes it to disk) and from the tests.
+    both from the CLI (main writes it to disk) and from the tests. The
+    weather_df argument lets tests inject a tiny DataFrame instead of
+    calling Open-Meteo; the CLI leaves it None and load_weather() handles
+    fetch and cache.
     """
     df_raw, slot_times = read_raw(CITY, vehicle, data_dir=data_dir)
     cells = pick_cells(df_raw, slot_times, threshold)
@@ -385,9 +441,10 @@ def build(vehicle, threshold, data_dir=None):
     base = add_rate_features(base)
     base = add_evening_features(base, df_raw, slot_times)
     base = add_baseline_features(base)
-    # Moritz' weather columns are joined in later, here: on time.dt.floor("h")
-    # against model/weather.py output (hourly in Europe/Zurich). They belong
-    # to FEATURES_A, because tomorrow's forecast is known the evening before.
+
+    if weather_df is None:
+        weather_df = load_weather()
+    base = add_weather_features(base, weather_df)
 
     return base[OUTPUT_COLUMNS].sort_values(["time", "cell_id"]).reset_index(drop=True)
 

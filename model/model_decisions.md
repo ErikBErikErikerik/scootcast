@@ -52,9 +52,17 @@ Historie bauen. Die App kann sie ohne Live-API berechnen.
   Historie" mit "keine Historie da" verwechselt wird). Macht train.py das
   Gewichten der jungen Zellen leichter.
 
-**Wetter (temp_c, precip_mm, wind_kmh)**: gehört logisch zu Gruppe A, weil
-die Prognose für morgen am Vorabend schon bekannt ist. Noch nicht
-eingebaut, siehe Platzhalter-Kommentar in `build_dataset.py`.
+- **temperature_c, precipitation_mm**: stündliche Werte aus Moritz'
+  `model/weather.py` (Open-Meteo). Gehören in Gruppe A, weil die Prognose
+  für morgen am Vorabend schon bekannt ist. **Join-Regel:** `time.dt.ceil("h")`
+  verknüpft jeden Slot mit der folgenden vollen Stunde, weil Open-Meteo die
+  Niederschlagsmenge bei 08:00 als Summe der Stunde 07:00 bis 08:00 liefert.
+  Ein Slot um 07:10 gehört also zur Wetterzeile 08:00; ein Slot um genau
+  08:00 bleibt ebenfalls bei 08:00 (ceil einer vollen Stunde ist sie selbst).
+  Fehlende Wetterstunden bleiben NaN. **Caveat:** Im Training sehen wir
+  tatsächliches Wetter (`get_history()`), die App nutzt dagegen die Prognose
+  vom Vorabend (`get_forecast()`). Die App ist deshalb etwas ungenauer als
+  die Trainingsauswertung vermuten lässt, besonders bei Regenschauern.
 
 ## Features Gruppe B (braucht Live-API)
 
