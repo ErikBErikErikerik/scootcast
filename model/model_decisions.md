@@ -82,19 +82,29 @@ Vorhersage ganz einzustellen.
 - **baseline_week**: `available` derselben Zelle genau 7 Tage vorher.
   NaN, wenn der Slot vor einer Woche nicht gespeichert war.
 - **baseline_week_nearby**: analog mit `available_nearby`.
+- **baseline_evening**: kalibrierte Wahrscheinlichkeit
+  `P(available | evening_count_cell > 0)` bzw.
+  `P(available | evening_count_cell == 0)`, getrennt nach is_weekend,
+  gelernt **ausschliesslich aus den Trainingstagen** (vor `SPLIT_DATE`).
+  Rows ohne gespeicherten Abend-Slot bekommen NaN.
 
-Diese beiden sind die naive Baseline "wie vor einer Woche". Die starke
-Baseline ist `rate_cell` (bzw. `rate_nearby`) selbst: historische
-Häufigkeit pro Zelle, Stunde und Tagesart. In der Bauauswertung ab
-`SPLIT_DATE` schlägt `rate_cell` den `baseline_week`-Vergleich deutlich
-(Brier 0.21 gegen 0.38 auf Werktagen für Scooter).
-
-Als dritte Referenz druckt `evaluate()` eine **Konstante**: den Anteil
-`available=1` im Training, getrennt nach Werktag und Wochenende. Das ist
-die ehrlichste Nicht-Modell-Baseline, weil sie keinerlei Zellenwissen
-nutzt. Dazu kommen der **Brier Skill Score** von `rate_cell` gegenüber
-der Konstanten und der Vergleich **mittlere Prognose vs. tatsächlicher
-Anteil** im Test.
+Reihenfolge der Baselines nach Stärke in der Auswertung:
+1. `baseline_evening`: **die Messlatte fürs ML-Modell**. In der
+   Scooter-Auswertung ab `SPLIT_DATE` schafft sie Brier 0.14 (Werktag),
+   deutlich besser als `rate_cell` (0.21) oder die Konstante (0.24). Das
+   Modell muss diese Marke schlagen, sonst ist der Aufwand nicht
+   gerechtfertigt. `baseline_evening` ist zwei Zahlen pro Segment, also
+   ein extrem einfaches "Modell"; alles was train.py mehr leistet, muss
+   sich an ihr messen.
+2. `rate_cell`: historische Zellenrate nach Stunde und Tagesart. Schlägt
+   `baseline_week` deutlich (Brier 0.21 gegen 0.38 auf Werktagen).
+3. `baseline_week`: die naive "wie vor einer Woche"-Referenz.
+4. **Konstante**: Anteil `available=1` im Training, getrennt nach
+   is_weekend. Druckt `evaluate()` zusätzlich, als ehrlichste Nicht-
+   Zellen-Baseline. Dazu kommen der **Brier Skill Score** jeder Baseline
+   gegen die Konstante, die **false-alarm**-Quote (Prognose ab 0.7, aber
+   kein Fahrzeug da) und der Vergleich **mittlere Prognose vs.
+   tatsächlicher Anteil** im Test.
 
 **Was wir in der Auswertung sehen und ehrlich zugeben müssen:**
 - `rate_cell` schlägt die Konstante an Werktagen nur knapp (BSS rund
@@ -111,6 +121,20 @@ Anteil** im Test.
   **Nebenziel**, Hauptziel bleibt `available`. Nearby dient der App dazu,
   Treffer "ein Scooter steht zwei Zellen weiter" weiter als Erfolg zu
   zählen.
+
+## Umfang: nur Scooter
+
+Das Modell wird nur auf der Scooter-Tabelle trainiert. Grund:
+
+- Zwischen dem 24.11. und 26.11.2026 ist die St. Galler Bike-Flotte von
+  rund 140 auf etwa 24 Fahrzeuge gefallen. Zürich blieb im selben
+  Zeitfenster stabil, also ist das **kein Feed-Fehler**, sondern eine
+  tatsächliche Reduktion vor Ort.
+- Mit nur noch rund 24 Velos ist das Signal für Zellenprognosen zu dünn;
+  die historischen Raten passen nicht mehr zur aktuellen Flotte.
+- Die Bike-Tabelle bleibt **baubar** (`python3 model/build_dataset.py
+  --vehicle bike` funktioniert weiter), damit wir die Zahlen für die
+  Präsentation ansprechen können. Trainiert wird sie nicht.
 
 ## Bekannte Grenzen
 

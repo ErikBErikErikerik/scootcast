@@ -19,6 +19,8 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from datetime import date  # noqa: E402
+
 from model.build_dataset import (  # noqa: E402
     BASELINES,
     FEATURES_A,
@@ -27,6 +29,7 @@ from model.build_dataset import (  # noqa: E402
     TARGETS,
     add_weather_features,
     build,
+    calibrate_evening_baseline,
     split_by_day,
 )
 
@@ -263,6 +266,41 @@ class BuildDatasetTests(unittest.TestCase):
         result = add_weather_features(base, wx)
         self.assertTrue(math.isnan(result.iloc[0]["temperature_c"]))
         self.assertTrue(math.isnan(result.iloc[0]["precipitation_mm"]))
+
+    def test_baseline_evening_is_calibrated_from_training_per_is_weekend(self):
+        # Pre-split training rows teach the two probabilities:
+        #   workday, ev>0: available mean = 2/3 (two out of three)
+        #   workday, ev==0: available mean = 0
+        #   weekend, ev>0: available mean = 1 (one of one)
+        # Post-split rows then receive those numbers depending on their
+        # own (is_weekend, evening_count_cell>0) cell. NaN evening_count
+        # keeps baseline_evening NaN.
+        tz = "Europe/Zurich"
+        times = pd.to_datetime([
+            "2026-11-10 09:00",  # train, workday, ev>0, avail=1
+            "2026-11-10 10:00",  # train, workday, ev>0, avail=0
+            "2026-11-10 11:00",  # train, workday, ev>0, avail=1
+            "2026-11-10 12:00",  # train, workday, ev==0, avail=0
+            "2026-11-14 09:00",  # train, weekend (Sat), ev>0, avail=1
+            "2026-11-25 09:00",  # test, workday, ev>0 -> expect 2/3
+            "2026-11-25 10:00",  # test, workday, ev==0 -> expect 0
+            "2026-11-28 09:00",  # test, weekend, ev>0 -> expect 1
+            "2026-11-25 11:00",  # test, workday, ev NaN -> expect NaN
+        ]).tz_localize(tz)
+        df = pd.DataFrame({
+            "time": times,
+            "cell_id": ["100_100"] * 9,
+            "is_weekend": [0, 0, 0, 0, 1, 0, 0, 1, 0],
+            "evening_count_cell": [5, 5, 5, 0, 5, 5, 0, 5, float("nan")],
+            "available": [1, 0, 1, 0, 1, 0, 0, 0, 0],
+        })
+        out = calibrate_evening_baseline(df, split_date=date(2026, 11, 21))
+        got = out.set_index("time")["baseline_evening"]
+        self.assertAlmostEqual(got[pd.Timestamp("2026-11-25 09:00", tz=tz)], 2 / 3)
+        self.assertEqual(got[pd.Timestamp("2026-11-25 10:00", tz=tz)], 0.0)
+        self.assertEqual(got[pd.Timestamp("2026-11-28 09:00", tz=tz)], 1.0)
+        self.assertTrue(math.isnan(got[pd.Timestamp("2026-11-25 11:00", tz=tz)]))
+        self.assertIn("baseline_evening", BASELINES)
 
     def test_split_by_day_is_strict_on_the_split_date(self):
         # Build a frame spanning the SPLIT_DATE boundary.

@@ -81,7 +81,7 @@ FEATURES_B = [
     "evening_fleet",
 ]
 TARGETS = ["available", "available_nearby"]
-BASELINES = ["baseline_week", "baseline_week_nearby"]
+BASELINES = ["baseline_week", "baseline_week_nearby", "baseline_evening"]
 
 OUTPUT_COLUMNS = (
     ["time", "cell_id", "vehicle"] + TARGETS + FEATURES_A + FEATURES_B + BASELINES
@@ -346,6 +346,39 @@ def add_evening_features(base, df_raw, slot_times):
     return base.drop(columns=["prev_date", "evening_slot"])
 
 
+def calibrate_evening_baseline(df, split_date=None):
+    """Fill the baseline_evening column using probabilities from training rows.
+
+    For each is_weekend segment two numbers are learnt from rows before
+    split_date:
+      P(available=1 | evening_count_cell > 0) and
+      P(available=1 | evening_count_cell == 0)
+    Every row of df then receives the probability that matches its own
+    (is_weekend, evening_count_cell > 0) cell. Rows where
+    evening_count_cell is NaN (no stored evening slot) stay NaN, so the
+    baseline is undefined when the evening fleet is unknown. Separating
+    workday and weekend keeps this honest, because the commuter pattern
+    differs strongly.
+    """
+    if split_date is None:
+        split_date = SPLIT_DATE
+    out = df.copy()
+    out["baseline_evening"] = np.nan
+    train_mask = out["time"].dt.date < split_date
+    for ws in (0, 1):
+        seg_train = out[train_mask & (out["is_weekend"] == ws)]
+        valid = seg_train.dropna(subset=["evening_count_cell", "available"])
+        has_ev = valid.loc[valid["evening_count_cell"] > 0, "available"]
+        no_ev = valid.loc[valid["evening_count_cell"] == 0, "available"]
+        p_with = float(has_ev.mean()) if len(has_ev) else float("nan")
+        p_without = float(no_ev.mean()) if len(no_ev) else float("nan")
+
+        seg_all = out["is_weekend"] == ws
+        out.loc[seg_all & (out["evening_count_cell"] > 0), "baseline_evening"] = p_with
+        out.loc[seg_all & (out["evening_count_cell"] == 0), "baseline_evening"] = p_without
+    return out
+
+
 def load_weather(cache_path=WEATHER_CACHE):
     """Return hourly weather history, from the live API with a CSV fallback.
 
@@ -446,6 +479,8 @@ def build(vehicle, threshold, data_dir=None, weather_df=None):
         weather_df = load_weather()
     base = add_weather_features(base, weather_df)
 
+    base = calibrate_evening_baseline(base)
+
     return base[OUTPUT_COLUMNS].sort_values(["time", "cell_id"]).reset_index(drop=True)
 
 
@@ -488,57 +523,124 @@ def _false_alarm_rate(y, p, threshold=0.7):
     return float(((mask) & (y == 0)).mean())
 
 
-def evaluate(test_df, train_df):
-    """Print Brier scores, Brier Skill Scores and calibration on the test block.
+def _evaluate_block(test_block, train_df):
+    """Print Brier, BSS vs. constant and false-alarm rate for both targets.
 
-    Three references are compared on the same rows (only where baseline_week
-    AND the rate baseline are both present):
-      baseline_week: naive "same slot seven days ago"
-      rate_cell:     expanding-window per-cell/hour/is_weekend frequency
-      constant:      mean of the target in the training block, per is_weekend
-    The row count is printed so the Brier scores stay directly comparable.
-    The Brier Skill Score of rate_cell against the constant shows whether
-    the per-cell signal buys anything over knowing just the share.
-    Mean prediction vs. actual mean exposes the drift from the shrinking
-    fleet: if rate_cell says 0.45 but the test mean is 0.35, the model
-    overestimates because the past has more vehicles than the present.
+    Uses the same rows for all baselines of a target (dropna on everything
+    at once), so the Brier scores are directly comparable. baseline_evening
+    is only defined for `available`; it is dropped from the prediction list
+    for `available_nearby`. The constant is the training mean of the target
+    per is_weekend; it is both printed as its own Brier and used as the
+    reference for every baseline's Brier Skill Score. The false-alarm rate
+    is the share of rows where the baseline predicts >= 0.7 but the target
+    is 0, that is, the "we promised a vehicle and none was there" case.
     """
-    pairs = [
-        ("available", "baseline_week", "rate_cell"),
-        ("available_nearby", "baseline_week_nearby", "rate_nearby"),
+    groups = [
+        ("available", ["baseline_week", "rate_cell", "baseline_evening"]),
+        ("available_nearby", ["baseline_week_nearby", "rate_nearby"]),
     ]
-    for target, bweek, rate in pairs:
-        print(f"\n{target} vs {bweek} vs {rate} vs constant")
-        for is_weekend, label in ((0, "workday"), (1, "weekend")):
-            train_block = train_df[train_df["is_weekend"] == is_weekend]
-            test_block = test_df[test_df["is_weekend"] == is_weekend]
-            constant = float(train_block[target].mean())
-            common = test_block.dropna(subset=[bweek, rate, target])
+    for target, preds in groups:
+        print(f"  {target}")
+        for is_weekend, wlabel in ((0, "workday"), (1, "weekend")):
+            train_seg = train_df[train_df["is_weekend"] == is_weekend]
+            constant = float(train_seg[target].mean())
+            seg = test_block[test_block["is_weekend"] == is_weekend]
+            common = seg.dropna(subset=preds + [target])
             if common.empty:
-                print(f"  {label:7} no rows with both baselines present")
+                print(f"    {wlabel:7} no rows with all baselines present")
                 continue
             y = common[target].to_numpy()
-            p_week = common[bweek].to_numpy()
-            p_rate = common[rate].to_numpy()
             p_const = np.full(len(y), constant)
-            brier_week = _brier(y, p_week)
-            brier_rate = _brier(y, p_rate)
             brier_const = _brier(y, p_const)
-            bss_rate = 1.0 - brier_rate / brier_const if brier_const > 0 else float("nan")
-            mean_pred = float(p_rate.mean())
-            mean_actual = float(y.mean())
+            fa_const = _false_alarm_rate(y, p_const)
             print(
-                f"  {label:7} n={len(common):>7_}"
-                f"  Brier {bweek}={brier_week:.4f}"
-                f"  Brier {rate}={brier_rate:.4f}"
-                f"  Brier constant={brier_const:.4f} (c={constant:.3f})"
-                f"  BSS {rate}={bss_rate:+.3f}"
+                f"    {wlabel:7} n={len(common):>7_}  "
+                f"constant Brier={brier_const:.4f} FA={fa_const:.3f} c={constant:.3f}  "
+                f"actual mean={y.mean():.3f}"
             )
-            print(
-                f"          mean({rate})={mean_pred:.3f} vs actual={mean_actual:.3f}"
-                f"  false-alarm {bweek}={_false_alarm_rate(y, p_week):.3f}"
-                f"  {rate}={_false_alarm_rate(y, p_rate):.3f}"
-            )
+            for p in preds:
+                brier_p = _brier(y, common[p])
+                fa_p = _false_alarm_rate(y, common[p])
+                bss = 1.0 - brier_p / brier_const if brier_const > 0 else float("nan")
+                mean_pred = float(common[p].mean())
+                print(
+                    f"      {p:22} Brier={brier_p:.4f}  BSS={bss:+.3f}  "
+                    f"FA={fa_p:.3f}  mean={mean_pred:.3f}"
+                )
+
+
+def _per_day_table(test_df, train_df):
+    """Print one row per test day: date, weekday, n, mean fleet, Brier and actual.
+
+    Replaces the earlier two-block split around 2026-11-23, which would have
+    compared workdays against a weekend-only block (the test weekend 21./22.11.
+    falls before the fleet drop and nothing else does). The per-day view makes
+    the fleet shrink visible day by day via the mean evening_fleet column.
+    """
+    print(
+        f"  {'date':10} {'wd':3} {'n':>7} {'mean_fleet':>10} {'actual':>7}"
+        f" {'Brier rate':>10} {'Brier evening':>13} {'Brier const':>11}"
+    )
+    train_by_ws = {
+        ws: float(train_df[train_df["is_weekend"] == ws]["available"].mean())
+        for ws in (0, 1)
+    }
+    test_df = test_df.copy()
+    test_df["_date"] = test_df["time"].dt.date
+    for day in sorted(test_df["_date"].unique()):
+        day_rows = test_df[test_df["_date"] == day]
+        common = day_rows.dropna(
+            subset=["baseline_week", "rate_cell", "baseline_evening", "available"]
+        )
+        if common.empty:
+            print(f"  {day!s:10} (no rows with all baselines present)")
+            continue
+        is_weekend = int(common["is_weekend"].iloc[0])
+        wd = day.strftime("%a")
+        y = common["available"].to_numpy()
+        mean_fleet = float(common["evening_fleet"].mean())
+        constant = train_by_ws[is_weekend]
+        print(
+            f"  {day!s:10} {wd:3} {len(common):>7_} {mean_fleet:>10.1f} "
+            f"{y.mean():>7.3f} {_brier(y, common['rate_cell']):>10.4f} "
+            f"{_brier(y, common['baseline_evening']):>13.4f} "
+            f"{_brier(y, np.full(len(y), constant)):>11.4f}"
+        )
+
+
+def evaluate(test_df, train_df):
+    """Print Brier scores and Brier Skill Score for several test slices.
+
+    Two aggregated blocks plus one per-day table are printed on the same
+    test data:
+      full test:    everything from SPLIT_DATE on
+      workday 7-8h: hour 7:00 to 8:59, the commuter morning window
+      per day:      one row per test date with the mean evening_fleet, so
+                    the shrinking-fleet effect is visible day by day
+    Each aggregated block runs _evaluate_block(). Three model-free
+    baselines plus the constant are compared on rows where all of them
+    are present:
+      baseline_week:     naive "same slot seven days ago"
+      rate_cell:         expanding-window per-cell/hour/is_weekend frequency
+      baseline_evening:  calibrated P(available | evening_count_cell) from
+                         the training rows, per is_weekend. This is the
+                         strongest model-free reference and the real bar
+                         the ML model has to beat.
+      constant:          mean of the target in the training block
+    """
+    workday_morning = (test_df["is_weekend"] == 0) & test_df["hour"].between(7, 8)
+    blocks = [
+        ("full test block", test_df),
+        ("workday 7-8h", test_df[workday_morning]),
+    ]
+    for label, block in blocks:
+        print(f"\n=== {label}  (n={len(block):_}) ===")
+        if block.empty:
+            continue
+        _evaluate_block(block, train_df)
+
+    print("\n=== per-day summary ===")
+    _per_day_table(test_df, train_df)
 
 
 def main():
